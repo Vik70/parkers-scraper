@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from pathlib import Path
+from resolver import resolve_review_url
+
 
 import httpx
 import pandas as pd
@@ -297,45 +299,64 @@ async def scrape_review_page(url: str, cfg: ScrapeConfig) -> Dict:
                 "article_markdown": below["article_markdown"],
                 "sections": sections, "url": url}
 
-async def scrape_one(url: str, out_dir: Path, meta: Dict, expand: bool, retries: int = 2) -> Dict:
+async def scrape_one(
+    url: str,
+    out_dir: Path,
+    meta: Dict,
+    expand: bool,
+    retries: int = 2
+) -> Dict:
     """
-    Resolve /specs/ if needed, scrape the review page, and write a JSON file.
-    Returns a small status dict for the index CSV.
+    Resolve ANY Parkers URL to a valid review/used-review page first,
+    scrape it, and write JSON. If nothing resolves, skip scraping and
+    write a stub JSON instead.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build a stable filename
+    # Build safe filename
     base = meta.get("id") or meta.get("slug") or slugify(meta.get("name") or meta.get("model") or url)
     fname = slugify(base)
-    # Add a short hash to avoid collisions
     h = abs(hash(url)) % (10**8)
     json_path = out_dir / f"{fname}-{h}.json"
 
     status = {"url_in": url, "json_path": str(json_path), **meta}
 
-    # Resolve review URL if this is /specs/
-    review_url = url
-    if is_specs_url(url):
-        resolved = await resolve_review_url(url)
-        status["resolved_status"] = resolved.get("status")
-        review_url = resolved.get("resolved_url") or url
-        status["review_url"] = review_url
-        if not resolved.get("resolved_url"):
-            status["ok"] = False
-            status["error"] = "could_not_resolve_review_url"
-            return status
-    else:
-        status["review_url"] = review_url
+    # ALWAYS use resolver first
+    try:
+        pre = await resolve_review_url(url)
+        status["resolved_status"] = pre.get("status")
+        status["review_url"] = pre.get("review_url")
+        status["candidates_tried"] = "|".join(pre.get("tried", []))
+    except Exception as e:
+        status.update({"ok": False, "error": f"resolver_failed: {e}"})
+        return status
 
-    # Retry loop
+    # If no valid URL found, save stub JSON + stop
+    if not pre.get("ok"):
+        json_path.write_text(json.dumps({
+            "title": "Preflight failed",
+            "article_text": "",
+            "article_markdown": "",
+            "sections": {"full_text": ""},
+            "url": url,
+            "review_url": pre.get("review_url"),
+            "preflight_status": pre.get("status"),
+            "candidates_tried": pre.get("tried", []),
+            "meta": meta
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        status["ok"] = False
+        status["error"] = pre.get("status") or "could_not_resolve_review_url"
+        return status
+
+    review_url = pre["review_url"]
+
+    # Attempt scraping resolved URL
     attempt = 0
     last_err = None
     while attempt <= retries:
         try:
             cfg = ScrapeConfig(expand=expand, save_html=None, overall_timeout_s=75)
-            coro = scrape_review_page(review_url, cfg)
-            data = await asyncio.wait_for(coro, timeout=cfg.overall_timeout_s)
-            # attach meta
+            data = await asyncio.wait_for(scrape_review_page(review_url, cfg), timeout=cfg.overall_timeout_s)
             data["meta"] = meta
             json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             status["ok"] = True
@@ -346,11 +367,13 @@ async def scrape_one(url: str, out_dir: Path, meta: Dict, expand: bool, retries:
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
         attempt += 1
-        await asyncio.sleep(1.0 * attempt)  # backoff
+        await asyncio.sleep(1.0 * attempt)
 
+    # Scrape failed after retries
     status["ok"] = False
     status["error"] = last_err or "unknown_error"
     return status
+
 
 # ==============================
 # Batch runner
