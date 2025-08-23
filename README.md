@@ -7,10 +7,11 @@ A comprehensive web scraping solution for extracting car review data from Parker
 **For the latest enhanced scraper system, see [README_ENHANCED_SCRAPER.md](README_ENHANCED_SCRAPER.md)**
 
 The enhanced system includes:
-- Smart URL resolution from broken review URLs to working ones
-- Structured content extraction matching your JSON requirements
-- Excel integration with column C population
-- Batch processing with concurrency control
+- **Smart URL resolution** from broken review URLs to working ones
+- **Structured content extraction** matching your JSON requirements
+- **🆕 Smart Data Organization** - 22 organized columns instead of single JSON
+- **Excel integration** with comprehensive data population
+- **Batch processing** with concurrency control
 
 ## 📁 Project Structure
 
@@ -31,8 +32,8 @@ The enhanced system includes:
 1. **Reads** your Excel file with car URLs
 2. **Resolves** broken URLs by going to specs pages first
 3. **Scrapes** review content from working URLs
-4. **Formats** data as structured JSON
-5. **Populates** Excel column C with scraped data
+4. **🆕 Organizes** data into 22 structured columns (Title, Price, Specs, Pros/Cons, etc.)
+5. **Populates** Excel with organized, searchable data for easy analysis
 
 ## 🎯 Use Cases
 
@@ -43,4 +44,5 @@ The enhanced system includes:
 
 ## 📖 Documentation
 
-See [README_ENHANCED_SCRAPER.md](README_ENHANCED_SCRAPER.md) for detailed usage instructions, configuration options, and troubleshooting.
+- **[README_ENHANCED_SCRAPER.md](README_ENHANCED_SCRAPER.md)** - Detailed usage instructions, configuration options, and troubleshooting
+- **[DATA_ORGANIZATION_GUIDE.md](DATA_ORGANIZATION_GUIDE.md)** - 🆕 Complete guide to the new 22-column data organization system

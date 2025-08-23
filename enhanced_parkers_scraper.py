@@ -52,9 +52,9 @@ COOKIE_BUTTON_SELECTORS = [
 @dataclass
 class ScrapeConfig:
     headless: bool = True
-    timeout_s: int = 60
+    timeout: int = 30000
     save_debug_html: bool = False
-    retry_count: int = 2
+    retry_count: int = 3
 
 def normalize_ws(s: Optional[str]) -> str:
     """Normalize whitespace in strings."""
@@ -94,135 +94,227 @@ def get_content_after_element(element, tree) -> Optional[str]:
     except:
         return None
 
-def extract_sections_from_html(html_content: str, url: str) -> Dict[str, Any]:
-    """
-    Extract structured content from Parkers review page HTML.
-    Returns data in the same format as parkers_article.json.
-    """
-    tree = HTMLParser(html_content)
+def clean_text(text: str) -> str:
+    """Clean and normalize text content."""
+    if not text:
+        return ""
+    # Remove extra whitespace and normalize
+    text = re.sub(r'\s+', ' ', text.strip())
+    # Remove common unwanted elements
+    text = re.sub(r'© \d{4}-\d{4}.*?$', '', text, flags=re.MULTILINE | re.DOTALL)
+    text = re.sub(r'Bauer Media Group.*?$', '', text, flags=re.MULTILINE | re.DOTALL)
+    return text.strip()
+
+def extract_key_info_from_sections(sections: Dict[str, str], html_content: str) -> Dict[str, str]:
+    """Extract key information from sections into structured format."""
+    key_info = {}
+    
+    # Extract price information
+    if "At a glance" in sections:
+        glance_text = sections["At a glance"]
+        # Extract new price
+        new_price_match = re.search(r'Price new £([\d,]+) - £([\d,]+)', glance_text)
+        if new_price_match:
+            key_info["new_price_min"] = new_price_match.group(1).replace(',', '')
+            key_info["new_price_max"] = new_price_match.group(2).replace(',', '')
+        
+        # Extract used price
+        used_price_match = re.search(r'Used prices £([\d,]+) - £([\d,]+)', glance_text)
+        if used_price_match:
+            key_info["used_price_min"] = used_price_match.group(1).replace(',', '')
+            key_info["used_price_max"] = used_price_match.group(2).replace(',', '')
+        
+        # Extract road tax
+        tax_match = re.search(r'Road tax cost £([\d,]+) - £([\d,]+)', glance_text)
+        if tax_match:
+            key_info["road_tax_min"] = tax_match.group(1).replace(',', '')
+            key_info["road_tax_max"] = tax_match.group(2).replace(',', '')
+        
+        # Extract insurance group
+        insurance_match = re.search(r'Insurance group ([\d-]+)', glance_text)
+        if insurance_match:
+            key_info["insurance_group"] = insurance_match.group(1)
+        
+        # Extract fuel economy
+        fuel_match = re.search(r'Fuel economy ([^R]+) Range ([\d,]+) - ([\d,]+) miles', glance_text)
+        if fuel_match:
+            key_info["fuel_economy"] = fuel_match.group(1).strip()
+            key_info["range_min"] = fuel_match.group(2).replace(',', '')
+            key_info["range_max"] = fuel_match.group(3).replace(',', '')
+        
+        # Extract doors
+        doors_match = re.search(r'Number of doors ([\d]+)', glance_text)
+        if doors_match:
+            key_info["doors"] = doors_match.group(1)
+        
+        # Extract fuel types
+        fuel_types_match = re.search(r'Available fuel types ([^V]+)', glance_text)
+        if fuel_types_match:
+            key_info["fuel_types"] = fuel_types_match.group(1).strip()
+    
+    # Extract pros and cons
+    if "Pros & cons" in sections:
+        pros_cons = sections["Pros & cons"]
+        pros_match = re.search(r'PROS\s*(.*?)(?=CONS|$)', pros_cons, re.DOTALL | re.IGNORECASE)
+        cons_match = re.search(r'CONS\s*(.*?)(?=PROS|$)', pros_cons, re.DOTALL | re.IGNORECASE)
+        
+        if pros_match:
+            key_info["pros"] = clean_text(pros_match.group(1))
+        if cons_match:
+            key_info["cons"] = clean_text(cons_match.group(1))
+    
+    # Extract author and date
+    if "About the author" in sections:
+        author_text = sections["About the author"]
+        author_match = re.search(r'Written by ([^P]+) Published: ([^W]+)', author_text)
+        if author_match:
+            key_info["author"] = author_match.group(1).strip()
+            key_info["publish_date"] = author_match.group(2).strip()
+    
+    # Also try to extract from the HTML directly if not found in sections
+    if not key_info.get("author"):
+        # Try to find in the page content
+        author_match = re.search(r'Written by ([^,\n]+)', html_content)
+        if author_match:
+            key_info["author"] = author_match.group(1).strip()
+    
+    # Extract rivals
+    if "Abarth 500 Hatchback rivals" in sections:
+        rivals_text = sections["Abarth 500 Hatchback rivals"]
+        # Extract rival cars and ratings
+        rivals = []
+        rival_matches = re.findall(r'([A-Za-z\s]+)\s+([\d.]+)\s+out of\s+5', rivals_text)
+        for rival_name, rating in rival_matches:
+            rivals.append(f"{rival_name.strip()}: {rating}/5")
+        if rivals:
+            key_info["rivals"] = " | ".join(rivals)
+    
+    return key_info
+
+def extract_sections_from_html(html_content: str) -> Dict[str, Any]:
+    """Extract structured data from HTML content using selectolax."""
+    parser = HTMLParser(html_content)
     
     # Extract title
-    title_elem = tree.css_first("h1")
-    title = normalize_ws(title_elem.text()) if title_elem else "Unknown Review"
+    title = ""
+    title_elem = parser.css_first('h1')
+    if title_elem:
+        title = clean_text(title_elem.text())
     
-    # Extract main content areas
+    # Extract main article text
+    article_text = ""
+    article_elem = parser.css_first('main, .article-content, .review-content')
+    if article_elem:
+        # Get text content, excluding navigation and ads
+        text_parts = []
+        for elem in article_elem.css('p, h2, h3, h4, h5, h6'):
+            if elem.text().strip():
+                text_parts.append(elem.text().strip())
+        article_text = ' '.join(text_parts)
+    
+    # Extract sections
     sections = {}
-    full_text_parts = []
     
-    # Get all text content
-    body = tree.css_first("body")
-    if body:
-        full_text_parts.append(normalize_ws(body.text()))
+    # Look for specific section headers and content
+    section_headers = [
+        'Overview', 'Practicality & safety', 'Interior, tech & comfort', 
+        'Engines & handling', 'Ownership cost', 'Verdict', 'Pros & cons',
+        'At a glance', 'About the author'
+    ]
     
-    # Look for specific review sections using simple CSS selectors
-    section_selectors = {
-        "At a glance": [".at-a-glance", ".glance-section", "[class*='glance']"],
-        "Pros & cons": [".pros-cons", "[class*='pros']", "[class*='cons']"],
-        "Overview": [".overview", "[class*='overview']"],
-        "Verdict": [".verdict", "[class*='verdict']"],
-        "Practicality & safety": ["[class*='practicality']", "[class*='safety']"],
-        "Interior, tech & comfort": ["[class*='interior']", "[class*='comfort']"],
-        "Engines & handling": ["[class*='engines']", "[class*='handling']", "[class*='performance']"],
-        "Ownership cost": ["[class*='ownership']", "[class*='cost']"],
-        "About the author": [".author", ".by-author", "[class*='author']"],
-    }
-    
-    # Also look for headings with relevant text
-    headings = tree.css("h1, h2, h3, h4, h5, h6")
-    for heading in headings:
-        heading_text = normalize_ws(heading.text()).lower()
-        # Try to match heading text to sections
-        if "pros" in heading_text or "cons" in heading_text:
-            # Get the content after this heading
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Pros & cons"] = next_content
-        elif "overview" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Overview"] = next_content
-        elif "verdict" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Verdict"] = next_content
-        elif "practicality" in heading_text or "safety" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Practicality & safety"] = next_content
-        elif "interior" in heading_text or "comfort" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Interior, tech & comfort"] = next_content
-        elif "engine" in heading_text or "handling" in heading_text or "performance" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Engines & handling"] = next_content
-        elif "ownership" in heading_text or "cost" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["Ownership cost"] = next_content
-        elif "author" in heading_text:
-            next_content = get_content_after_element(heading, tree)
-            if next_content:
-                sections["About the author"] = next_content
-    
-    # Try to extract specific sections using class-based selectors
-    for section_name, selectors in section_selectors.items():
-        if section_name in sections:  # Skip if already found via headings
-            continue
-        for selector in selectors:
-            elements = tree.css(selector)
-            if elements:
-                # Get text from the first matching element and its siblings
-                element = elements[0]
-                section_text = normalize_ws(element.text())
-                if section_text and len(section_text) > 10:  # Only use substantial content
-                    sections[section_name] = section_text
-                    break
-    
-    # Extract rivals section
-    rivals_elements = tree.css(".rivals, [class*='rivals'], [class*='competitor']")
-    if not rivals_elements:
-        # Look for rivals mentioned in headings
-        for heading in tree.css("h1, h2, h3, h4, h5, h6"):
-            heading_text = normalize_ws(heading.text()).lower()
-            if "rivals" in heading_text or "competitor" in heading_text:
-                rivals_content = get_content_after_element(heading, tree)
-                if rivals_content:
-                    brand_model = title.split("(")[0].strip()
-                    sections[f"{brand_model} rivals"] = rivals_content
+    for header in section_headers:
+        # Find elements containing the header text
+        header_elements = parser.css('h1, h2, h3, h4, h5, h6')
+        for elem in header_elements:
+            if header.lower() in elem.text().lower():
+                # Get content after this header
+                content = get_content_after_element(parser, elem)
+                if content:
+                    sections[header] = clean_text(content)
                 break
-    else:
-        rivals_text = normalize_ws(rivals_elements[0].text())
-        if rivals_text:
-            # Clean up the title to match the pattern
-            brand_model = title.split("(")[0].strip()
-            sections[f"{brand_model} rivals"] = rivals_text
     
-    # Extract all paragraph content as fallback
-    paragraphs = tree.css("p")
-    article_text_parts = []
-    for p in paragraphs[:20]:  # Limit to first 20 paragraphs to avoid too much text
-        text = normalize_ws(p.text())
-        if text and len(text) > 20:  # Only substantial paragraphs
-            article_text_parts.append(text)
+    # Special handling for "At a glance" section
+    glance_elem = parser.css_first('.at-a-glance, .specs-overview, [class*="glance"]')
+    if glance_elem:
+        sections["At a glance"] = clean_text(glance_elem.text())
     
-    article_text = " ".join(article_text_parts)
-    full_text = " ".join(full_text_parts)
+    # Special handling for pros and cons
+    pros_cons_elem = parser.css_first('.review-details-introduction__pros-cons, .pros-cons, .pros-and-cons, [class*="pros"]')
+    if pros_cons_elem:
+        # Extract pros and cons separately for better structure
+        pros_elem = pros_cons_elem.css_first('.review-details-introduction__pros-cons__header--pros, [class*="pros"]')
+        cons_elem = pros_cons_elem.css_first('.review-details-introduction__pros-cons__header--cons, [class*="cons"]')
+        
+        if pros_elem:
+            # Get the ul element that follows the pros header
+            pros_ul = pros_elem.parent.css_first('ul')
+            if pros_ul:
+                pros_items = [li.text().strip() for li in pros_ul.css('li')]
+                sections["Pros"] = ' | '.join(pros_items)
+        
+        if cons_elem:
+            # Get the ul element that follows the cons header
+            cons_ul = cons_elem.parent.css_first('ul')
+            if cons_ul:
+                cons_items = [li.text().strip() for li in cons_ul.css('li')]
+                sections["Cons"] = ' | '.join(cons_items)
+        
+        # Also store the full pros & cons section
+        sections["Pros & cons"] = clean_text(pros_cons_elem.text())
     
-    # Create the result structure matching parkers_article.json
+    # Special handling for rivals
+    rivals_elem = parser.css_first('.review-details-introduction__rivals, .rivals, .competitors, [class*="rival"]')
+    if rivals_elem:
+        # Extract rivals with ratings
+        rival_cards = rivals_elem.css('.rival-review-card')
+        rivals_list = []
+        
+        for card in rival_cards:
+            # Get rival name
+            name_elem = card.css_first('.rival-review-card__content__text__model')
+            if name_elem:
+                rival_name = name_elem.text().strip()
+                
+                # Get rating
+                rating_elem = card.css_first('.star-rating__text')
+                if rating_elem:
+                    rating = rating_elem.text().strip()
+                    rivals_list.append(f"{rival_name}: {rating}/5")
+                else:
+                    rivals_list.append(rival_name)
+        
+        if rivals_list:
+            sections["Rivals"] = ' | '.join(rivals_list)
+        
+        # Also store the full rivals section
+        sections["Abarth 500 Hatchback rivals"] = clean_text(rivals_elem.text())
+    
+    # Create the main structure
     result = {
         "title": title,
-        "article_text": article_text,
-        "article_markdown": article_text,  # For now, same as article_text
-        "sections": {
-            "full_text": full_text,
-            **sections
-        },
-        "url": url
+        "article_text": clean_text(article_text),
+        "sections": sections
     }
     
+    # Extract key structured information
+    key_info = extract_key_info_from_sections(sections, html_content)
+    result["key_info"] = key_info
+    
     return result
+
+def get_content_after_element(parser: HTMLParser, element, max_elements: int = 5) -> str:
+    """Extract text content from elements following a given element."""
+    content_parts = []
+    current = element.next
+    
+    count = 0
+    while current and count < max_elements:
+        if hasattr(current, 'text') and current.text().strip():
+            content_parts.append(current.text().strip())
+            count += 1
+        current = current.next
+    
+    return ' '.join(content_parts)
 
 async def scrape_review_page(url: str, config: ScrapeConfig) -> Dict[str, Any]:
     """
@@ -237,7 +329,7 @@ async def scrape_review_page(url: str, config: ScrapeConfig) -> Dict[str, Any]:
             page = await ctx.new_page()
             
             # Navigate to the page
-            await page.goto(url, timeout=config.timeout_s * 1000, wait_until="domcontentloaded")
+            await page.goto(url, timeout=config.timeout * 1000, wait_until="domcontentloaded")
             
             # Handle cookies
             for selector in COOKIE_BUTTON_SELECTORS:
@@ -268,7 +360,7 @@ async def scrape_review_page(url: str, config: ScrapeConfig) -> Dict[str, Any]:
             await browser.close()
             
             # Extract structured content
-            return extract_sections_from_html(html_content, url)
+            return extract_sections_from_html(html_content)
             
     except Exception as e:
         print(f"[Scraper] Error scraping {url}: {e}")
@@ -329,78 +421,160 @@ async def process_single_url(url: str, config: ScrapeConfig) -> Dict[str, Any]:
             "error": str(e)
         }
 
-async def process_excel_file(
-    excel_path: str,
-    output_excel_path: str = None,
-    limit: Optional[int] = None,
-    offset: int = 0,
-    concurrency: int = 3,
-    config: ScrapeConfig = None
-):
-    """
-    Process the Excel file:
-    1. Read Series + URL.xlsx
-    2. Process each URL and get JSON data  
-    3. Populate column C with JSON data
-    4. Save updated Excel file
-    """
-    if config is None:
-        config = ScrapeConfig()
-    
-    if output_excel_path is None:
-        output_excel_path = excel_path.replace('.xlsx', '_with_data.xlsx')
-    
-    print(f"[Excel] Reading file: {excel_path}")
-    
-    # Read the Excel file
-    df = pd.read_excel(excel_path)
-    print(f"[Excel] Found {len(df)} rows")
-    
-    # Apply limit and offset
-    if offset > 0:
-        df = df.iloc[offset:]
-    if limit is not None:
-        df = df.iloc[:limit]
-    
-    print(f"[Excel] Processing {len(df)} rows (offset={offset}, limit={limit})")
-    
-    # Add column C for JSON data if it doesn't exist
-    if len(df.columns) < 3:
-        df['JSON_Data'] = None
-    else:
-        # Use existing third column
-        df.iloc[:, 2] = None
-    
-    # Semaphore for concurrency control
-    sem = asyncio.Semaphore(concurrency)
-    
-    async def process_row(idx, row):
-        async with sem:
-            url = str(row.iloc[1]).strip()  # Column B (Model URL)
-            if not url or url == 'nan':
-                return idx, {"error": "No URL"}
+async def process_url(url: str, config: ScrapeConfig) -> Dict[str, Any]:
+    """Process a single URL to extract car review data."""
+    try:
+        # Check if URL is already a review URL
+        if '/review' in url:
+            # Convert to specs URL first
+            specs_url = url.replace('/review', '/specs')
+            print(f"Converting review URL to specs: {specs_url}")
             
+            # Resolve to correct review URL
+            resolved_url = await resolve_via_specs_tabs_playwright(specs_url)
+            if resolved_url and resolved_url != specs_url:
+                url = resolved_url
+                print(f"Resolved to: {url}")
+            else:
+                print(f"Could not resolve review URL, using original: {url}")
+        else:
+            # Already a specs URL, resolve to review
+            resolved_url = await resolve_via_specs_tabs_playwright(url)
+            if resolved_url:
+                url = resolved_url
+                print(f"Resolved to: {url}")
+            else:
+                print(f"Could not resolve URL: {url}")
+                return {"error": "Could not resolve URL", "url": url, "processing_status": "failed"}
+        
+        # Now scrape the resolved review URL
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=config.headless)
             try:
-                json_data = await process_single_url(url, config)
-                return idx, json_data
-            except Exception as e:
-                print(f"[Excel] Error processing row {idx}: {e}")
-                return idx, {"error": str(e)}
+                page = await browser.new_page()
+                await page.goto(url, wait_until='networkidle', timeout=config.timeout)
+                
+                # Wait for content to load
+                await page.wait_for_timeout(2000)
+                
+                # Get the HTML content
+                html_content = await page.content()
+                
+                if config.save_debug_html:
+                    debug_file = f"debug_{url.split('/')[-1]}.html"
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                    print(f"Saved debug HTML to: {debug_file}")
+                
+                # Extract data
+                extracted_data = extract_sections_from_html(html_content)
+                extracted_data["url"] = url
+                extracted_data["processing_status"] = "success"
+                
+                return extracted_data
+                
+            finally:
+                await browser.close()
+                
+    except Exception as e:
+        print(f"Error processing {url}: {str(e)}")
+        return {
+            "error": str(e),
+            "url": url,
+            "processing_status": "failed"
+        }
+
+async def process_excel_file(excel_path: str, config: ScrapeConfig, max_rows: Optional[int] = None) -> None:
+    """Process URLs from Excel file and update with scraped data."""
+    # Read Excel file
+    df = pd.read_excel(excel_path)
     
-    # Process all rows concurrently
-    tasks = [process_row(idx, row) for idx, row in df.iterrows()]
-    results = await asyncio.gather(*tasks)
+    # Ensure we have the required columns
+    if 'Model URL' not in df.columns:
+        print("Error: 'Model URL' column not found in Excel file")
+        return
     
-    # Update DataFrame with results
-    for idx, json_data in results:
-        df.iloc[idx, 2] = json.dumps(json_data, ensure_ascii=False)
+    # Limit rows if specified
+    if max_rows:
+        df = df.head(max_rows)
+        print(f"Processing limited to {max_rows} rows")
+    
+    # Add new columns for structured data
+    new_columns = [
+        'Title', 'Author', 'Publish_Date', 'New_Price_Min', 'New_Price_Max',
+        'Used_Price_Min', 'Used_Price_Max', 'Road_Tax_Min', 'Road_Tax_Max',
+        'Insurance_Group', 'Fuel_Economy', 'Range_Min', 'Range_Max', 'Doors',
+        'Fuel_Types', 'Pros', 'Cons', 'Rivals', 'Article_Text', 'Full_JSON',
+        'Processing_Status', 'Resolved_URL'
+    ]
+    
+    for col in new_columns:
+        if col not in df.columns:
+            df[col] = ''
+    
+    # Process URLs
+    total_urls = len(df)
+    successful = 0
+    failed = 0
+    
+    for index, row in df.iterrows():
+        url = row['Model URL']
+        if pd.isna(url) or not url:
+            print(f"Row {index + 1}: No URL found")
+            continue
+        
+        print(f"\nProcessing row {index + 1}/{total_urls}: {url}")
+        
+        # Process the URL
+        result = await process_url(url, config)
+        
+        # Update DataFrame with results
+        if result.get("processing_status") == "success":
+            successful += 1
+            
+            # Extract key information
+            key_info = result.get("key_info", {})
+            
+            df.at[index, 'Title'] = result.get('title', '')
+            df.at[index, 'Author'] = key_info.get('author', '')
+            df.at[index, 'Publish_Date'] = key_info.get('publish_date', '')
+            df.at[index, 'New_Price_Min'] = key_info.get('new_price_min', '')
+            df.at[index, 'New_Price_Max'] = key_info.get('new_price_max', '')
+            df.at[index, 'Used_Price_Min'] = key_info.get('used_price_min', '')
+            df.at[index, 'Used_Price_Max'] = key_info.get('used_price_max', '')
+            df.at[index, 'Road_Tax_Min'] = key_info.get('road_tax_min', '')
+            df.at[index, 'Road_Tax_Max'] = key_info.get('road_tax_max', '')
+            df.at[index, 'Insurance_Group'] = key_info.get('insurance_group', '')
+            df.at[index, 'Fuel_Economy'] = key_info.get('fuel_economy', '')
+            df.at[index, 'Range_Min'] = key_info.get('range_min', '')
+            df.at[index, 'Range_Max'] = key_info.get('range_max', '')
+            df.at[index, 'Doors'] = key_info.get('doors', '')
+            df.at[index, 'Fuel_Types'] = key_info.get('fuel_types', '')
+            df.at[index, 'Pros'] = key_info.get('pros', '')
+            df.at[index, 'Cons'] = key_info.get('cons', '')
+            df.at[index, 'Rivals'] = key_info.get('rivals', '')
+            df.at[index, 'Article_Text'] = result.get('article_text', '')
+            df.at[index, 'Full_JSON'] = json.dumps(result, indent=2)
+            df.at[index, 'Processing_Status'] = 'success'
+            df.at[index, 'Resolved_URL'] = result.get('url', '')
+            
+            print(f"✓ Successfully scraped: {result.get('title', 'N/A')}")
+            
+        else:
+            failed += 1
+            df.at[index, 'Processing_Status'] = 'failed'
+            df.at[index, 'Full_JSON'] = json.dumps(result, indent=2)
+            print(f"✗ Failed to scrape: {result.get('error', 'Unknown error')}")
     
     # Save updated Excel file
-    print(f"[Excel] Saving updated file to: {output_excel_path}")
-    df.to_excel(output_excel_path, index=False)
+    output_path = excel_path.replace('.xlsx', '_enhanced.xlsx')
+    df.to_excel(output_path, index=False)
     
-    print(f"[Excel] Complete! Processed {len(results)} rows")
-    return output_excel_path
+    print(f"\n=== SCRAPING COMPLETE ===")
+    print(f"Total URLs processed: {total_urls}")
+    print(f"Successful: {successful}")
+    print(f"Failed: {failed}")
+    print(f"Output saved to: {output_path}")
 
 def main():
     import argparse
@@ -419,17 +593,14 @@ def main():
     
     config = ScrapeConfig(
         headless=args.headless,
-        timeout_s=args.timeout,
+        timeout=args.timeout * 1000, # Playwright timeout is in ms
         save_debug_html=args.debug_html
     )
     
     asyncio.run(process_excel_file(
         excel_path=args.excel,
-        output_excel_path=args.output,
-        limit=args.limit,
-        offset=args.offset,
-        concurrency=args.concurrency,
-        config=config
+        config=config,
+        max_rows=args.limit
     ))
 
 if __name__ == "__main__":
