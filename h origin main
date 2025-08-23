@@ -1,0 +1,8 @@
+[33m9a6510b[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m chore: clean up repository - remove old files and organize structure
+[33m88b45bf[m docs: update main README to reference enhanced scraper system
+[33mcca9866[m docs: add comprehensive README for enhanced scraper system
+[33m948c3d0[m feat: add production script for full dataset processing
+[33me8e0792[m feat: add test script for small batch processing
+[33m5daa174[m feat: implement enhanced scraper with URL resolution and content extraction
+[33mf32ed69[m feat: add clean URL resolver for specs to review conversion
+[33me35f646[m chore: add .gitignore and requirements.txt for project setup
