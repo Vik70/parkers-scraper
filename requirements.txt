@@ -1,0 +1,11 @@
+# Core dependencies for the Enhanced Parkers Scraper
+playwright>=1.40.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+httpx>=0.25.0
+selectolax>=0.3.0
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+# flake8>=6.0.0
