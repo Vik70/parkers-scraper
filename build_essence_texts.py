@@ -181,6 +181,199 @@ Body type: {body_type}; Length(mm): {length_mm or 'n/a'}.
 # ---------------- main ----------------
 
 
+def choose_size_descriptor(body_type: str, length_mm: float | None) -> str:
+    bt = norm(body_type)
+    L = None
+    try:
+        L = float(length_mm) if length_mm is not None else None
+    except Exception:
+        L = None
+    # Sportback / fastback / gran coupe → executive hatchback; size by length
+    if any(k in bt for k in ("sportback", "fastback", "gran coupe", "gran-coupe", "grancoupe")):
+        if L is not None and L >= 4850:
+            return "large executive hatchback (gran coupe style)"
+        return "executive hatchback (gran coupe style)"
+    if "estate" in bt or "touring" in bt:
+        return "premium estate" if any(k in bt for k in ("premium",)) else "estate"
+    if "suv" in bt or "crossover" in bt:
+        return "large SUV" if (L is not None and L >= 4700) else "crossover SUV"
+    if "saloon" in bt or "sedan" in bt:
+        return "executive saloon" if (L is None or L >= 4700) else "small saloon"
+    if "hatch" in bt:
+        if L is not None:
+            return "medium hatchback" if L >= 4300 else "small hatchback"
+        return "medium hatchback"
+    if "mpv" in bt:
+        return "MPV"
+    if "coupe" in bt:
+        return "coupe"
+    # Fallback purely by length
+    if L is not None and L >= 4850:
+        return "large executive car"
+    return body_type or "car"
+
+
+def performance_bucket(zero_to_62_s: float | None) -> str:
+    if zero_to_62_s is None:
+        return "unknown"
+    t = float(zero_to_62_s)
+    if t < 3.6:
+        return "hyper-performance"
+    if t < 5.0:
+        return "serious performance"
+    if t < 7.0:
+        return "brisk"
+    if t < 10.0:
+        return "relaxed"
+    return "economical"
+
+
+def mpg_bucket(mpg: float | None) -> str:
+    if mpg is None:
+        return ""
+    v = float(mpg)
+    if v >= 55:
+        return "strong economy"
+    if v >= 45:
+        return "good economy"
+    if v >= 35:
+        return "average economy"
+    return "lower economy"
+
+
+def boot_bucket(boot_l: float | None) -> str:
+    if boot_l is None:
+        return ""
+    b = float(boot_l)
+    if b < 300:
+        return "pack light"
+    if b < 450:
+        return "usable hatch practicality"
+    if b < 600:
+        return "generous boot capacity"
+    return "extra-large cargo space"
+
+
+def parse_first_numeric(df: pd.DataFrame, row: pd.Series, patterns: tuple[str, ...]) -> float | None:
+    for col in df.columns:
+        name = str(col)
+        if any(re.search(p, name, flags=re.I) for p in patterns):
+            try:
+                val = pd.to_numeric(row.get(col, None), errors="coerce")
+                if pd.notna(val):
+                    return float(val)
+            except Exception:
+                continue
+    return None
+
+
+def buyer_fit_from_signals(fuel: str, perf_bucket: str, body_type: str, mpg_b: str) -> str:
+    f = norm(fuel)
+    bt = norm(body_type)
+    fits: list[str] = []
+    if any(k in f for k in ("ev", "electric", "phev", "plug")):
+        fits.append("eco-conscious commuters")
+    if any(k in f for k in ("diesel", "tdi", "dci", "cdi")) or mpg_b in ("strong economy", "good economy"):
+        fits.append("high-mileage professionals")
+    if perf_bucket not in ("hyper-performance", "serious performance") and any(k in bt for k in ("estate", "touring", "suv", "crossover")):
+        fits.append("practical families")
+    if perf_bucket in ("hyper-performance", "serious performance"):
+        fits.append("performance enthusiasts")
+    if "hatch" in bt and perf_bucket in ("relaxed", "economical"):
+        fits.append("first-time buyers")
+    if not fits:
+        fits.append("city and suburban commuters")
+    # De-duplicate while preserving order
+    seen = set()
+    ordered = [x for x in fits if not (x in seen or seen.add(x))]
+    return ", ".join(ordered[:2])
+
+
+def _clean_years(model: str, years: str) -> str:
+    s = str(years)
+    # Prefer extracting year range or start year + onwards
+    m = re.findall(r"(19\d{2}|20\d{2})", s)
+    if len(m) >= 2:
+        return f"{m[0]}–{m[1]}"
+    if len(m) == 1:
+        return f"{m[0]}–present"
+    # Fallback: strip duplicated model prefix if present
+    s2 = s.replace(str(model), "").strip()
+    return s2 or s
+
+
+def compose_essence_main(make: str, model: str, years: str, body_type: str, engine: str, trans: str,
+                         zero_to_62_s: float | None, mpg: float | None, boot_l: float | None, seats: float | None,
+                         length_mm: float | None) -> str:
+    years_clean = _clean_years(model, years)
+    size_desc = choose_size_descriptor(body_type, length_mm)
+    intro = f"The {make} {model} ({years_clean}) is a {size_desc}."
+
+    # Driving character from engine/trans + performance
+    e = norm(engine)
+    t = norm(trans)
+    perf_b = performance_bucket(zero_to_62_s)
+    phrases: list[str] = []
+    if any(k in e for k in ("phev", "plug-in")):
+        phrases.append("quiet, tax-friendly running in town on electric power")
+    elif "hybrid" in e:
+        phrases.append("quiet, efficient progress in stop-start driving")
+    elif any(k in e for k in ("ev", "electric")):
+        phrases.append("silent, instant response, best with home charging")
+    elif any(k in e for k in ("diesel", "tdi", "dci", "cdi")):
+        phrases.append("relaxed long‑distance cruising with strong economy")
+    elif re.search(r"\b(1\.0|1\.2|1\.3|1\.4)\b", e):
+        phrases.append("nippy, efficient feel that suits urban and suburban use")
+    elif re.search(r"\b(1\.5|1\.6|1\.8|2\.0)\b", e):
+        phrases.append("balanced everyday pace with sensible running costs")
+
+    if any(k in t for k in ("auto", "dsg", "dct", "tronic")):
+        phrases.append("an effortless automatic to keep things smooth")
+    elif "manual" in t:
+        phrases.append("a more engaging manual shift")
+
+    # Performance bucket tone
+    perf_map = {
+        "hyper-performance": "ferociously quick with explosive acceleration",
+        "serious performance": "genuinely brisk when you want to push on",
+        "brisk": "brisk everyday pace",
+        "relaxed": "relaxed but capable",
+        "economical": "focused on economy over outright speed",
+    }
+    if perf_b != "unknown":
+        phrases.append(perf_map[perf_b])
+
+    driving = " It delivers " + ", ".join(phrases) + "." if phrases else ""
+
+    # Practicality & interior
+    bb = boot_bucket(boot_l)
+    seats_txt = "" if seats is None else f"{int(seats)} seats"
+    practicality_bits = []
+    if bb:
+        practicality_bits.append(bb)
+    if seats_txt:
+        practicality_bits.append(seats_txt)
+    practicality = " The boot and seating offer " + (", ".join(practicality_bits)) + "." if practicality_bits else ""
+
+    # Highlights
+    mb = mpg_bucket(mpg)
+    highlights = []
+    if mb:
+        highlights.append(mb)
+    highlights_txt = " Key highlights: " + ", ".join(highlights) + "." if highlights else ""
+
+    # Buyer fit
+    buyer_fit = buyer_fit_from_signals(engine, perf_b, body_type, mb)
+    buyer = f" Best suited for: {buyer_fit}."
+
+    text = (intro + driving + practicality + highlights_txt + buyer).strip()
+    # Trim to ~150 words
+    words = text.split()
+    if len(words) > 150:
+        text = " ".join(words[:150])
+    return text
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build essence_family and essence_variant_delta texts for 13k sheet")
     ap.add_argument("--input", required=True)
@@ -228,16 +421,51 @@ def main() -> None:
 
     df["essence_family"] = df["family_id"].map(fam_text_map)
 
-    # Variant deltas per row
-    def build_delta(row):
-        return variant_delta_from_specs(
-            row.get(args.engine_col),
-            row.get(args.fuel_col),
-            row.get(args.trans_col),
-            row.get(args.drive_col),
+    # Build per-variant essence_main with engine/trans baked in and buckets
+    essence_main_list: list[str] = []
+    delta_list: list[str] = []
+    specs_compact_list: list[str] = []
+    for _, row in df.iterrows():
+        make = row.get(args.make_col, "")
+        model = row.get(args.model_col, "")
+        yrs = row.get(args.years_col, "")
+        body = row.get(args.body_col, "")
+        engine = row.get(args.engine_col, "")
+        trans = row.get(args.trans_col, "")
+
+        zero_to_62 = parse_first_numeric(df, row, (r"0\s*[-–]?\s*60\s*mph", r"0\s*[-–]?\s*62"))
+        mpg_val = parse_first_numeric(df, row, (r"mpg", r"wltp", r"economy"))
+        boot_val = parse_first_numeric(df, row, (r"luggage", r"boot", r"capacity.*litre"))
+        seats_val = parse_first_numeric(df, row, (r"seats",))
+        length_val = parse_first_numeric(df, row, (r"length\s*\(mm\)", r"length_mm", r"average of length"))
+
+        essence_main_list.append(
+            compose_essence_main(make, model, yrs, body, engine, trans, zero_to_62, mpg_val, boot_val, seats_val, length_val)
         )
 
-    df["essence_variant_delta"] = df.apply(build_delta, axis=1)
+        # Keep delta as ancillary (optional)
+        delta_list.append(variant_delta_from_specs(engine, row.get(args.fuel_col, ""), trans, row.get(args.drive_col, "")))
+
+        # Specs summary compact (numbers OK)
+        parts = []
+        if zero_to_62 is not None:
+            parts.append(f"0–62mph {zero_to_62:.1f}s")
+        if isinstance(trans, str) and trans:
+            parts.append(trans)
+        fuel = row.get(args.fuel_col, "")
+        if isinstance(fuel, str) and fuel:
+            parts.append(str(fuel))
+        if seats_val is not None:
+            parts.append(f"{int(seats_val)} seats")
+        if boot_val is not None:
+            parts.append(f"{int(round(boot_val))}L boot")
+        if mpg_val is not None:
+            parts.append(f"{int(round(mpg_val))}mpg")
+        specs_compact_list.append("; ".join(parts))
+
+    df["essence_main"] = essence_main_list
+    df["essence_variant_delta"] = delta_list
+    df["specs_summary_compact"] = specs_compact_list
 
     # Ensure rivals_json_family column exists
     if "rivals_json_family" not in df.columns:

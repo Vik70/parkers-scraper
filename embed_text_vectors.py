@@ -2,9 +2,9 @@
 """
 Embeds three text columns into vector columns with L2-normalization:
 
-- vector_family_essence  ← embed essence_family
-- vector_family_rivals   ← embed compact rivals string from rivals_json_family
-- vector_variant_delta   ← embed essence_variant_delta
+- vector_main            ← embed essence_main (or essence_family fallback)
+- vector_specs           ← embed specs_summary_compact (facts only)
+- vector_rivals          ← embed compact rivals string from rivals_json_family
 
 Usage:
   set OPENAI_API_KEY=...  (Windows PowerShell: $env:OPENAI_API_KEY="...")
@@ -75,7 +75,23 @@ def main() -> None:
 
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
-        raise SystemExit("OPENAI_API_KEY not set in environment")
+        dotenv_path = Path(".env")
+        if dotenv_path.exists():
+            try:
+                for line in dotenv_path.read_text(encoding="utf-8").splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        if k.strip() == "OPENAI_API_KEY" and not os.getenv("OPENAI_API_KEY"):
+                            os.environ["OPENAI_API_KEY"] = v.strip().strip('"').strip("'")
+                            api_key = os.environ["OPENAI_API_KEY"]
+                            break
+            except Exception:
+                pass
+    if not api_key:
+        raise SystemExit("OPENAI_API_KEY not set in environment or .env")
 
     in_path = Path(args.input)
     if not in_path.exists():
@@ -84,15 +100,26 @@ def main() -> None:
 
     df = pd.read_excel(in_path)
 
-    need_cols = ["essence_family", "rivals_json_family", "essence_variant_delta"]
+    # Choose main text: prefer essence_main; fallback to essence_family
+    if "essence_main" in df.columns:
+        main_series = df["essence_main"].astype(str).fillna("")
+    elif "essence_family" in df.columns:
+        main_series = df["essence_family"].astype(str).fillna("")
+    else:
+        raise SystemExit("Missing required text column: essence_main or essence_family")
+
+    need_cols = ["rivals_json_family"]
+    for c in need_cols:
+        if c not in df.columns:
+            raise SystemExit(f"Missing required column: {c}")
     for c in need_cols:
         if c not in df.columns:
             raise SystemExit(f"Missing required column: {c}")
 
     # Prepare input strings
-    fam_texts = df["essence_family"].astype(str).fillna("").tolist()
+    fam_texts = main_series.tolist()
     riv_texts = [rivals_to_string(v) for v in df["rivals_json_family"].tolist()]
-    var_texts = df["essence_variant_delta"].astype(str).fillna("").tolist()
+    specs_texts = df.get("specs_summary_compact", pd.Series([""] * len(df))).astype(str).fillna("").tolist()
 
     client = OpenAI()
 
@@ -106,11 +133,11 @@ def main() -> None:
 
     fam_vecs = embed_series(fam_texts)
     riv_vecs = embed_series(riv_texts)
-    var_vecs = embed_series(var_texts)
+    spec_vecs = embed_series(specs_texts)
 
-    df["vector_family_essence"] = [json.dumps(v) for v in fam_vecs]
-    df["vector_family_rivals"] = [json.dumps(v) for v in riv_vecs]
-    df["vector_variant_delta"] = [json.dumps(v) for v in var_vecs]
+    df["vector_main"] = [json.dumps(v) for v in fam_vecs]
+    df["vector_rivals"] = [json.dumps(v) for v in riv_vecs]
+    df["vector_specs"] = [json.dumps(v) for v in spec_vecs]
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_excel(out_path, index=False)
