@@ -155,13 +155,82 @@ def extract_key_info_from_sections(sections: Dict[str, str], html_content: str) 
     # Extract pros and cons
     if "Pros & cons" in sections:
         pros_cons = sections["Pros & cons"]
+        # Better regex patterns for pros and cons
         pros_match = re.search(r'PROS\s*(.*?)(?=CONS|$)', pros_cons, re.DOTALL | re.IGNORECASE)
         cons_match = re.search(r'CONS\s*(.*?)(?=PROS|$)', pros_cons, re.DOTALL | re.IGNORECASE)
         
         if pros_match:
-            key_info["pros"] = clean_text(pros_match.group(1))
+            pros_text = clean_text(pros_match.group(1))
+            # Clean up the pros text - remove extra whitespace and normalize
+            pros_text = re.sub(r'\s+', ' ', pros_text).strip()
+            if pros_text and pros_text != '&':
+                key_info["pros"] = pros_text
         if cons_match:
-            key_info["cons"] = clean_text(cons_match.group(1))
+            cons_text = clean_text(cons_match.group(1))
+            # Clean up the cons text - remove extra whitespace and normalize
+            cons_text = re.sub(r'\s+', ' ', cons_text).strip()
+            if cons_text and cons_text != '&':
+                key_info["cons"] = cons_text
+    
+    # Also try to extract pros/cons from individual sections if available
+    if "Pros" in sections and not key_info.get("pros"):
+        pros_text = sections["Pros"]
+        if pros_text and pros_text != '&':
+            key_info["pros"] = clean_text(pros_text)
+    
+    if "Cons" in sections and not key_info.get("cons"):
+        cons_text = sections["Cons"]
+        if cons_text and cons_text != '&':
+            key_info["cons"] = clean_text(cons_text)
+    
+    # If still no pros/cons found, try to extract from the HTML content directly
+    if not key_info.get("pros") or not key_info.get("cons"):
+        # Look for common pros/cons patterns in the HTML
+        html_lower = html_content.lower()
+        
+        # Try to find pros and cons using various text patterns
+        pros_patterns = [
+            r'pros?[:\s]+(.*?)(?=cons?|verdict|overview|$)', 
+            r'advantages?[:\s]+(.*?)(?=disadvantages?|verdict|overview|$)',
+            r'good points?[:\s]+(.*?)(?=bad points?|verdict|overview|$)',
+            r'strengths?[:\s]+(.*?)(?=weaknesses?|verdict|overview|$)',
+            r'benefits?[:\s]+(.*?)(?=drawbacks|verdict|overview|$)'
+        ]
+        cons_patterns = [
+            r'cons?[:\s]+(.*?)(?=pros?|verdict|overview|$)', 
+            r'disadvantages?[:\s]+(.*?)(?=advantages?|verdict|overview|$)',
+            r'bad points?[:\s]+(.*?)(?=good points?|verdict|overview|$)',
+            r'weaknesses?[:\s]+(.*?)(?=strengths?|verdict|overview|$)',
+            r'drawbacks?[:\s]+(.*?)(?=benefits|verdict|overview|$)'
+        ]
+        
+        # Try to extract pros
+        if not key_info.get("pros"):
+            for pattern in pros_patterns:
+                pros_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                if pros_match:
+                    pros_text = clean_text(pros_match.group(1))
+                    if pros_text and len(pros_text) > 5 and pros_text != '&':
+                        # Clean up the text
+                        pros_text = re.sub(r'\s+', ' ', pros_text).strip()
+                        # Limit length to avoid very long text
+                        if len(pros_text) < 1000:
+                            key_info["pros"] = pros_text
+                            break
+        
+        # Try to extract cons
+        if not key_info.get("cons"):
+            for pattern in cons_patterns:
+                cons_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                if cons_match:
+                    cons_text = clean_text(cons_match.group(1))
+                    if cons_text and len(cons_text) > 5 and cons_text != '&':
+                        # Clean up the text
+                        cons_text = re.sub(r'\s+', ' ', cons_text).strip()
+                        # Limit length to avoid very long text
+                        if len(cons_text) < 1000:
+                            key_info["cons"] = cons_text
+                            break
     
     # Extract author and date
     if "About the author" in sections:
@@ -178,8 +247,34 @@ def extract_key_info_from_sections(sections: Dict[str, str], html_content: str) 
         if author_match:
             key_info["author"] = author_match.group(1).strip()
     
-    # Extract rivals
-    if "Abarth 500 Hatchback rivals" in sections:
+    # Extract rivals - prioritize the new structured format with URLs
+    if "Rivals" in sections and not key_info.get("rivals"):
+        rivals_text = sections["Rivals"]
+        if rivals_text:
+            # The new format includes URLs, so we can use it directly
+            key_info["rivals"] = clean_text(rivals_text)
+    
+    # Also try to extract rivals from the Rivals section if available
+    if "Rivals" in sections and not key_info.get("rivals"):
+        rivals_text = sections["Rivals"]
+        if rivals_text:
+            key_info["rivals"] = clean_text(rivals_text)
+    
+    # Extract rivals with URLs from HTML content
+    if not key_info.get("rivals"):
+        # Try to find rivals in the HTML with potential URLs
+        rivals_pattern = r'<a[^>]*href="([^"]*)"[^>]*>([^<]+)</a>'
+        rival_matches = re.findall(rivals_pattern, html_content)
+        if rival_matches:
+            rivals_with_urls = []
+            for url, name in rival_matches:
+                if 'rival' in url.lower() or 'competitor' in url.lower():
+                    rivals_with_urls.append(f"{name.strip()}: {url}")
+            if rivals_with_urls:
+                key_info["rivals"] = " | ".join(rivals_with_urls)
+    
+    # Fallback: Extract rivals from the old format if nothing else worked
+    if "Abarth 500 Hatchback rivals" in sections and not key_info.get("rivals"):
         rivals_text = sections["Abarth 500 Hatchback rivals"]
         # Extract rival cars and ratings
         rivals = []
@@ -250,22 +345,114 @@ def extract_sections_from_html(html_content: str) -> Dict[str, Any]:
             pros_ul = pros_elem.parent.css_first('ul')
             if pros_ul:
                 pros_items = [li.text().strip() for li in pros_ul.css('li')]
-                sections["Pros"] = ' | '.join(pros_items)
+                if pros_items:
+                    sections["Pros"] = ' | '.join(pros_items)
         
         if cons_elem:
             # Get the ul element that follows the cons header
             cons_ul = cons_elem.parent.css_first('ul')
             if cons_ul:
                 cons_items = [li.text().strip() for li in cons_ul.css('li')]
-                sections["Cons"] = ' | '.join(cons_items)
+                if cons_items:
+                    sections["Cons"] = ' | '.join(cons_items)
         
         # Also store the full pros & cons section
         sections["Pros & cons"] = clean_text(pros_cons_elem.text())
     
+    # More robust pros/cons extraction - look for various patterns
+    if "Pros" not in sections or "Cons" not in sections:
+        # Look for pros and cons in the entire HTML content
+        html_lower = html_content.lower()
+        
+        # Try to find pros and cons sections using various selectors
+        pros_selectors = [
+            '.pros', '[class*="pros"]', '.advantages', '.benefits',
+            '.good-points', '.strengths', '.positives'
+        ]
+        cons_selectors = [
+            '.cons', '[class*="cons"]', '.disadvantages', '.drawbacks',
+            '.bad-points', '.weaknesses', '.negatives'
+        ]
+        
+        # Look for pros
+        if "Pros" not in sections:
+            for selector in pros_selectors:
+                pros_elem = parser.css_first(selector)
+                if pros_elem:
+                    pros_text = clean_text(pros_elem.text())
+                    if pros_text and len(pros_text) > 5 and pros_text != '&':
+                        sections["Pros"] = pros_text
+                        break
+        
+        # Look for cons
+        if "Cons" not in sections:
+            for selector in cons_selectors:
+                cons_elem = parser.css_first(selector)
+                if cons_elem:
+                    cons_text = clean_text(cons_elem.text())
+                    if cons_text and len(cons_text) > 5 and cons_text != '&':
+                        sections["Cons"] = cons_text
+                        break
+        
+        # If still not found, try to extract from text content using regex
+        if "Pros" not in sections or "Cons" not in sections:
+            # Look for text patterns like "Pros:" or "Cons:" in the content
+            pros_patterns = [
+                r'pros?[:\s]+(.*?)(?=cons?|$)', 
+                r'advantages?[:\s]+(.*?)(?=disadvantages?|$)',
+                r'good points?[:\s]+(.*?)(?=bad points?|$)',
+                r'strengths?[:\s]+(.*?)(?=weaknesses?|$)'
+            ]
+            cons_patterns = [
+                r'cons?[:\s]+(.*?)(?=pros?|$)', 
+                r'disadvantages?[:\s]+(.*?)(?=advantages?|$)',
+                r'bad points?[:\s]+(.*?)(?=good points?|$)',
+                r'weaknesses?[:\s]+(.*?)(?=strengths?|$)'
+            ]
+            
+            # Try to extract pros
+            if "Pros" not in sections:
+                for pattern in pros_patterns:
+                    pros_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                    if pros_match:
+                        pros_text = clean_text(pros_match.group(1))
+                        if pros_text and len(pros_text) > 5 and pros_text != '&':
+                            sections["Pros"] = pros_text
+                            break
+            
+            # Try to extract cons
+            if "Cons" not in sections:
+                for pattern in cons_patterns:
+                    cons_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                    if cons_match:
+                        cons_text = clean_text(cons_match.group(1))
+                        if cons_text and len(cons_text) > 5 and cons_text != '&':
+                            sections["Cons"] = cons_text
+                            break
+    
+    # Alternative pros/cons extraction if the above didn't work
+    if "Pros" not in sections or "Cons" not in sections:
+        # Look for pros and cons in the text content
+        pros_cons_text = pros_cons_elem.text() if pros_cons_elem else ""
+        if pros_cons_text:
+            # Try to extract pros and cons using regex
+            pros_match = re.search(r'PROS\s*(.*?)(?=CONS|$)', pros_cons_text, re.DOTALL | re.IGNORECASE)
+            cons_match = re.search(r'CONS\s*(.*?)(?=PROS|$)', pros_cons_text, re.DOTALL | re.IGNORECASE)
+            
+            if pros_match and "Pros" not in sections:
+                pros_text = clean_text(pros_match.group(1))
+                if pros_text and pros_text != '&':
+                    sections["Pros"] = pros_text
+            
+            if cons_match and "Cons" not in sections:
+                cons_text = clean_text(cons_match.group(1))
+                if cons_text and cons_text != '&':
+                    sections["Cons"] = cons_text
+    
     # Special handling for rivals
     rivals_elem = parser.css_first('.review-details-introduction__rivals, .rivals, .competitors, [class*="rival"]')
     if rivals_elem:
-        # Extract rivals with ratings
+        # Extract rivals with ratings and URLs
         rival_cards = rivals_elem.css('.rival-review-card')
         rivals_list = []
         
@@ -275,13 +462,28 @@ def extract_sections_from_html(html_content: str) -> Dict[str, Any]:
             if name_elem:
                 rival_name = name_elem.text().strip()
                 
-                # Get rating
-                rating_elem = card.css_first('.star-rating__text')
-                if rating_elem:
-                    rating = rating_elem.text().strip()
-                    rivals_list.append(f"{rival_name}: {rating}/5")
+                # Get the URL from the card's href attribute
+                rival_url = card.attributes.get('href', '')
+                if rival_url:
+                    # Make URL absolute if it's relative
+                    if rival_url.startswith('/'):
+                        rival_url = f"https://www.parkers.co.uk{rival_url}"
+                    
+                    # Get rating if available
+                    rating_elem = card.css_first('.star-rating__text')
+                    if rating_elem:
+                        rating = rating_elem.text().strip()
+                        rivals_list.append(f"{rival_name}: {rating}/5 | {rival_url}")
+                    else:
+                        rivals_list.append(f"{rival_name} | {rival_url}")
                 else:
-                    rivals_list.append(rival_name)
+                    # Fallback: just name and rating if no URL
+                    rating_elem = card.css_first('.star-rating__text')
+                    if rating_elem:
+                        rating = rating_elem.text().strip()
+                        rivals_list.append(f"{rival_name}: {rating}/5")
+                    else:
+                        rivals_list.append(rival_name)
         
         if rivals_list:
             sections["Rivals"] = ' | '.join(rivals_list)
@@ -447,31 +649,73 @@ async def process_url(url: str, config: ScrapeConfig) -> Dict[str, Any]:
                 print(f"Could not resolve URL: {url}")
                 return {"error": "Could not resolve URL", "url": url, "processing_status": "failed"}
         
-        # Now scrape the resolved review URL
+        # Now scrape the resolved review URL with fallback to specs
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=config.headless)
             try:
+                # Try review page first with extended timeout
                 page = await browser.new_page()
-                await page.goto(url, wait_until='networkidle', timeout=config.timeout)
-                
-                # Wait for content to load
-                await page.wait_for_timeout(2000)
-                
-                # Get the HTML content
-                html_content = await page.content()
-                
-                if config.save_debug_html:
-                    debug_file = f"debug_{url.split('/')[-1]}.html"
-                    with open(debug_file, 'w', encoding='utf-8') as f:
-                        f.write(html_content)
-                    print(f"Saved debug HTML to: {debug_file}")
-                
-                # Extract data
-                extracted_data = extract_sections_from_html(html_content)
-                extracted_data["url"] = url
-                extracted_data["processing_status"] = "success"
-                
-                return extracted_data
+                try:
+                    print(f"Attempting to load review page: {url}")
+                    await page.goto(url, wait_until='domcontentloaded', timeout=60000)  # 60 second timeout
+                    
+                    # Wait for content to load
+                    await page.wait_for_timeout(3000)
+                    
+                    # Get the HTML content
+                    html_content = await page.content()
+                    
+                    if config.save_debug_html:
+                        debug_file = f"debug_review_{url.split('/')[-1]}.html"
+                        with open(debug_file, 'w', encoding='utf-8') as f:
+                            f.write(html_content)
+                        print(f"Saved review page HTML to: {debug_file}")
+                    
+                    # Extract data from review page
+                    extracted_data = extract_sections_from_html(html_content)
+                    extracted_data["url"] = url
+                    extracted_data["processing_status"] = "success"
+                    extracted_data["source"] = "review_page"
+                    
+                    print(f"✅ Successfully scraped review page: {extracted_data.get('title', 'N/A')}")
+                    return extracted_data
+                    
+                except Exception as review_error:
+                    print(f"⚠️  Review page failed ({str(review_error)[:100]}...), falling back to specs page")
+                    
+                    # Fallback: Extract content from specs page instead
+                    specs_url = url.replace('/review', '/specs').replace('/used-review', '/specs')
+                    print(f"Fallback: Scraping specs page: {specs_url}")
+                    
+                    try:
+                        await page.goto(specs_url, wait_until='domcontentloaded', timeout=30000)
+                        await page.wait_for_timeout(2000)
+                        
+                        html_content = await page.content()
+                        
+                        if config.save_debug_html:
+                            debug_file = f"debug_specs_fallback_{specs_url.split('/')[-1]}.html"
+                            with open(debug_file, 'w', encoding='utf-8') as f:
+                                f.write(html_content)
+                            print(f"Saved specs fallback HTML to: {debug_file}")
+                        
+                        # Extract data from specs page
+                        extracted_data = extract_sections_from_html(html_content)
+                        extracted_data["url"] = specs_url
+                        extracted_data["processing_status"] = "success"
+                        extracted_data["source"] = "specs_page_fallback"
+                        extracted_data["fallback_reason"] = str(review_error)[:200]
+                        
+                        print(f"✅ Successfully scraped specs page (fallback): {extracted_data.get('title', 'N/A')}")
+                        return extracted_data
+                        
+                    except Exception as specs_error:
+                        print(f"❌ Both review and specs pages failed")
+                        return {
+                            "error": f"Review page failed: {str(review_error)[:100]}... Specs fallback failed: {str(specs_error)[:100]}...",
+                            "url": url,
+                            "processing_status": "failed"
+                        }
                 
             finally:
                 await browser.close()
