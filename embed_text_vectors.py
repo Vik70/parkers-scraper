@@ -57,10 +57,29 @@ def rivals_to_string(val: str) -> str:
     return " | ".join(parts)
 
 
+def _sanitize_text(value: str) -> str:
+    """Return a safe, non-empty string for the embeddings API.
+
+    Some inputs can be empty or contain textual NaNs when read from Excel.
+    The embeddings endpoint may reject completely empty inputs, so we
+    substitute a lightweight placeholder in those cases.
+    """
+    if value is None:
+        return "placeholder"
+    s = str(value).strip()
+    if not s:
+        return "placeholder"
+    low = s.lower()
+    if low in {"nan", "none", "null"}:
+        return "placeholder"
+    return s
+
+
 def embed_texts(texts: List[str], client: OpenAI, model: str) -> List[List[float]]:
     if not texts:
         return []
-    resp = client.embeddings.create(model=model, input=texts)
+    safe_inputs = [_sanitize_text(t) for t in texts]
+    resp = client.embeddings.create(model=model, input=safe_inputs)
     # openai>=1.0 returns data list with .embedding
     return [d.embedding for d in resp.data]
 
@@ -123,24 +142,38 @@ def main() -> None:
 
     client = OpenAI()
 
-    def embed_series(texts: List[str]) -> List[List[float]]:
+    def embed_series(texts: List[str], label: str) -> List[List[float]]:
         vectors: List[List[float]] = []
-        for i in range(0, len(texts), args.batch):
+        total = len(texts)
+        start = time.time()
+        for i in range(0, total, args.batch):
             chunk = texts[i : i + args.batch]
             raw_vecs = embed_texts(chunk, client, args.model)
             vectors.extend([l2_normalize(v) for v in raw_vecs])
+            done = min(i + len(chunk), total)
+            elapsed = max(time.time() - start, 1e-6)
+            rate = done / elapsed
+            remaining = total - done
+            eta_sec = remaining / rate if rate > 0 else 0.0
+            print(f"[{label}] {done}/{total} embedded | {rate:.1f}/s | ETA ~{eta_sec/60:.1f} min", flush=True)
         return vectors
 
-    fam_vecs = embed_series(fam_texts)
-    riv_vecs = embed_series(riv_texts)
-    spec_vecs = embed_series(specs_texts)
+    fam_vecs = embed_series(fam_texts, "main")
+    riv_vecs = embed_series(riv_texts, "rivals")
+    spec_vecs = embed_series(specs_texts, "specs")
 
     df["vector_main"] = [json.dumps(v) for v in fam_vecs]
     df["vector_rivals"] = [json.dumps(v) for v in riv_vecs]
     df["vector_specs"] = [json.dumps(v) for v in spec_vecs]
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(out_path, index=False)
+    # Write CSV by default to avoid Excel's 32,767 char cell limit truncating long vectors
+    if out_path.suffix.lower() == ".csv":
+        df.to_csv(out_path, index=False, encoding="utf-8")
+    else:
+        # Warn: Excel will truncate very long JSON strings per cell
+        print("Warning: Writing XLSX may truncate very long vector strings (>32,767 chars per cell). Prefer CSV.", flush=True)
+        df.to_excel(out_path, index=False)
     print(f"Saved: {out_path}")
 
 

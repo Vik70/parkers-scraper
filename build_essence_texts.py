@@ -214,18 +214,21 @@ def choose_size_descriptor(body_type: str, length_mm: float | None) -> str:
 
 
 def performance_bucket(zero_to_62_s: float | None) -> str:
+    """User-specified buckets:
+    <3.5 supercar, 3.5–5 very fast, 5–7 decent performance, 7–10 average slow, 10+ very slow.
+    """
     if zero_to_62_s is None:
         return "unknown"
     t = float(zero_to_62_s)
-    if t < 3.6:
-        return "hyper-performance"
+    if t < 3.5:
+        return "supercar"
     if t < 5.0:
-        return "serious performance"
+        return "very fast"
     if t < 7.0:
-        return "brisk"
+        return "decent performance"
     if t < 10.0:
-        return "relaxed"
-    return "economical"
+        return "average slow"
+    return "very slow"
 
 
 def mpg_bucket(mpg: float | None) -> str:
@@ -334,11 +337,11 @@ def compose_essence_main(make: str, model: str, years: str, body_type: str, engi
 
     # Performance bucket tone
     perf_map = {
-        "hyper-performance": "ferociously quick with explosive acceleration",
-        "serious performance": "genuinely brisk when you want to push on",
-        "brisk": "brisk everyday pace",
-        "relaxed": "relaxed but capable",
-        "economical": "focused on economy over outright speed",
+        "supercar": "ferociously quick with explosive acceleration",
+        "very fast": "genuinely rapid when you want to push on",
+        "decent performance": "brisk everyday pace",
+        "average slow": "relaxed rather than outright quick",
+        "very slow": "focused more on economy than speed",
     }
     if perf_b != "unknown":
         phrases.append(perf_map[perf_b])
@@ -374,11 +377,78 @@ def compose_essence_main(make: str, model: str, years: str, body_type: str, engi
     return text
 
 
+# ---------------- LLM variant enhancement ----------------
+
+def _load_api_key_from_env_file() -> None:
+    if os.getenv("OPENAI_API_KEY"):
+        return
+    env_path = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        if k.strip() == "OPENAI_API_KEY" and not os.getenv("OPENAI_API_KEY"):
+                            os.environ["OPENAI_API_KEY"] = v.strip().strip('"').strip("'")
+                            break
+        except Exception:
+            pass
+
+
+def llm_enhance_variant_text(make: str, model: str, years: str, body_type: str, engine: str, trans: str,
+                             size_desc: str, perf_bucket_label: str, boot_bucket_label: str, seats_label: str,
+                             raw_context: str = "") -> str:
+    """Refine the variant essence with GPT, enforcing size/common-sense and new performance buckets."""
+    try:
+        from openai import OpenAI
+    except Exception:
+        # If openai isn't installed, return empty so caller can fallback
+        return ""
+
+    _load_api_key_from_env_file()
+    if not os.getenv("OPENAI_API_KEY"):
+        return ""
+
+    client = OpenAI()
+    system = (
+        "You are an automotive copywriter. Write 80–140 word product descriptions that: "
+        "1) Start with size/style (use common sense by model name if body_type is vague or clearly incorrect, e.g., M2 = small coupe). "
+        "2) Bake engine + transmission feel. 3) Use performance labels exactly from: "
+        "<3.5s supercar; 3.5–5 very fast; 5–7 decent performance; 7–10 average slow; 10+ very slow>. "
+        "4) Mention practicality succinctly (boot bucket + seats), avoid calling performance cars 'family'. "
+        "5) End with 'Best suited for: <respective audiences>'. Prefer qualitative buckets over raw numbers. "
+        "You may use the structured context to improve accuracy."
+    )
+    user = (
+        f"Make/Model: {make} {model} ({years}).\n"
+        f"Body type (raw): {body_type}.\n"
+        f"Size descriptor (from rules): {size_desc}.\n"
+        f"Engine/Transmission (raw): {engine} / {trans}.\n"
+        f"Performance bucket: {perf_bucket_label}.\n"
+        f"Practicality: boot={boot_bucket_label or 'n/a'}, seats={seats_label or 'n/a'}.\n"
+        + ("Structured context: " + raw_context + "\n" if raw_context else "")
+        + "Rewrite a single paragraph as per instructions."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.4,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build essence_family and essence_variant_delta texts for 13k sheet")
+    ap = argparse.ArgumentParser(description="Build per-variant essence texts (rules or LLM-enhanced)")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
-    ap.add_argument("--mode", choices=["rules", "llm"], default="rules")
+    ap.add_argument("--mode", choices=["rules", "llm", "llm_variant"], default="rules")
     ap.add_argument("--make-col", default="Make")
     ap.add_argument("--model-col", default="Model")
     ap.add_argument("--years-col", default="Series (production years start-end)")
@@ -388,9 +458,14 @@ def main() -> None:
     ap.add_argument("--fuel-col", default="Fuel_Type")
     ap.add_argument("--trans-col", default="Transmission")
     ap.add_argument("--drive-col", default="Drivetrain")
+    ap.add_argument("--limit", type=int, default=None, help="Process only first N rows (for testing)")
+    ap.add_argument("--start-index", type=int, default=0, help="Start processing from this row index (0-based)")
+    ap.add_argument("--progress-every", type=int, default=200, help="Log progress every N processed rows")
+    ap.add_argument("--progress-file", default="processing_position.txt", help="File to write current row index for resume")
     args = ap.parse_args()
 
-    df = pd.read_excel(args.input)
+    # Read all columns as strings to avoid slow/mixed-type inference; we parse numbers explicitly later
+    df = pd.read_excel(args.input, dtype=str)
     # Map existing rivals JSON if present
     if "rivals_json_family" not in df.columns and "Rivals_JSON" in df.columns:
         df["rivals_json_family"] = df["Rivals_JSON"].astype(str)
@@ -425,7 +500,10 @@ def main() -> None:
     essence_main_list: list[str] = []
     delta_list: list[str] = []
     specs_compact_list: list[str] = []
-    for _, row in df.iterrows():
+    processed = 0
+    for idx, row in df.iterrows():
+        if idx < args.start_index:
+            continue
         make = row.get(args.make_col, "")
         model = row.get(args.model_col, "")
         yrs = row.get(args.years_col, "")
@@ -439,12 +517,15 @@ def main() -> None:
         seats_val = parse_first_numeric(df, row, (r"seats",))
         length_val = parse_first_numeric(df, row, (r"length\s*\(mm\)", r"length_mm", r"average of length"))
 
-        essence_main_list.append(
-            compose_essence_main(make, model, yrs, body, engine, trans, zero_to_62, mpg_val, boot_val, seats_val, length_val)
-        )
+        base_text = compose_essence_main(make, model, yrs, body, engine, trans, zero_to_62, mpg_val, boot_val, seats_val, length_val)
+        essence_main_list.append(base_text)
+        # Write incrementally so we don't lose progress on interrupt
+        df.at[idx, "essence_main"] = base_text
 
         # Keep delta as ancillary (optional)
-        delta_list.append(variant_delta_from_specs(engine, row.get(args.fuel_col, ""), trans, row.get(args.drive_col, "")))
+        delta_val = variant_delta_from_specs(engine, row.get(args.fuel_col, ""), trans, row.get(args.drive_col, ""))
+        delta_list.append(delta_val)
+        df.at[idx, "essence_variant_delta"] = delta_val
 
         # Specs summary compact (numbers OK)
         parts = []
@@ -461,11 +542,116 @@ def main() -> None:
             parts.append(f"{int(round(boot_val))}L boot")
         if mpg_val is not None:
             parts.append(f"{int(round(mpg_val))}mpg")
-        specs_compact_list.append("; ".join(parts))
+        specs_val = "; ".join(parts)
+        specs_compact_list.append(specs_val)
+        df.at[idx, "specs_summary_compact"] = specs_val
 
-    df["essence_main"] = essence_main_list
-    df["essence_variant_delta"] = delta_list
-    df["specs_summary_compact"] = specs_compact_list
+        processed += 1
+        if processed % max(1, args.progress_every) == 0 or processed == 1:
+            print(f"[base] row {idx+1}/{len(df)}")
+            try:
+                if args.progress_file:
+                    with open(args.progress_file, "w", encoding="utf-8") as pf:
+                        pf.write(str(idx))
+                # Checkpoint save
+                df.to_excel(args.output, index=False)
+            except Exception:
+                pass
+        if args.limit is not None and processed >= args.limit:
+            break
+
+    # Assign generated texts; support start-index window when resuming
+    start_win = int(args.start_index or 0)
+    if args.limit is not None:
+        end_win = start_win + len(essence_main_list) - 1
+        if end_win >= start_win:
+            df.loc[start_win:end_win, "essence_main"] = essence_main_list
+            df.loc[start_win:end_win, "essence_variant_delta"] = delta_list
+            df.loc[start_win:end_win, "specs_summary_compact"] = specs_compact_list
+    else:
+        # On resume, we've already written per-row; only bulk-fill when starting from 0
+        if start_win == 0 and len(essence_main_list) == len(df):
+            df["essence_main"] = essence_main_list
+            df["essence_variant_delta"] = delta_list
+            df["specs_summary_compact"] = specs_compact_list
+
+    # LLM enhancement per variant (optional)
+    if args.mode == "llm_variant":
+        # Helper used below
+        def _row_structured_context(df_in: pd.DataFrame, row_in: pd.Series) -> str:
+            pairs = []
+            def add(label: str, value):
+                if value is None:
+                    return
+                if isinstance(value, float) and pd.isna(value):
+                    return
+                s = str(value).strip()
+                if s:
+                    pairs.append(f"{label}={s}")
+            # Core identifiers
+            add("series_years", row_in.get(args.years_col))
+            add("body_type", row_in.get(args.body_col))
+            add("engine_type", row_in.get(args.engine_col))
+            add("transmission", row_in.get(args.trans_col))
+            # Performance
+            add("zero_to_60_min", parse_first_numeric(df_in, row_in, (r"^\s*min\.?\s*of\s*0-60", r"0\s*[-–]?\s*60\s*mph", r"0\s*[-–]?\s*62")))
+            add("zero_to_60_max", parse_first_numeric(df_in, row_in, (r"^\s*max\.?\s*of\s*0-60",)))
+            add("power_min_bhp", parse_first_numeric(df_in, row_in, (r"min\.?\s*of\s*power.*bhp", r"power.*bhp")))
+            add("power_max_bhp", parse_first_numeric(df_in, row_in, (r"max\.?\s*of\s*power.*bhp",)))
+            # Economy
+            add("mpg_min", parse_first_numeric(df_in, row_in, (r"min\.?\s*of\s*mpg",)))
+            add("mpg_max", parse_first_numeric(df_in, row_in, (r"max\.?\s*of\s*mpg",)))
+            # Dimensions & practicality
+            add("length_mm", parse_first_numeric(df_in, row_in, (r"average of length", r"length\s*\(mm\)", r"length_mm")))
+            add("width_mm", parse_first_numeric(df_in, row_in, (r"average of width", r"width\s*\(mm\)", r"width_mm")))
+            add("height_mm", parse_first_numeric(df_in, row_in, (r"average of height", r"height\s*\(mm\)", r"height_mm")))
+            add("luggage_l", parse_first_numeric(df_in, row_in, (r"luggage|boot|capacity.*litre",)))
+            add("seats", parse_first_numeric(df_in, row_in, (r"seats",)))
+            add("doors", parse_first_numeric(df_in, row_in, (r"doors",)))
+            return "; ".join(pairs)
+        enhanced: list[str] = []
+        processed = 0
+        for i, row in df.iterrows():
+            if i < args.start_index:
+                continue
+            if args.limit is not None and processed >= args.limit:
+                break
+            make = row.get(args.make_col, "")
+            model = row.get(args.model_col, "")
+            yrs = row.get(args.years_col, "")
+            body = row.get(args.body_col, "")
+            engine = row.get(args.engine_col, "")
+            trans = row.get(args.trans_col, "")
+            # derive labels already computed
+            zero_to_62 = parse_first_numeric(df, row, (r"0\s*[-–]?\s*60\s*mph", r"0\s*[-–]?\s*62"))
+            perf_b = performance_bucket(zero_to_62)
+            bb = boot_bucket(parse_first_numeric(df, row, (r"luggage", r"boot", r"capacity.*litre")))
+            seats_val = parse_first_numeric(df, row, (r"seats",))
+            seats_label = f"{int(seats_val)} seats" if seats_val is not None else ""
+            length_val = parse_first_numeric(df, row, (r"length\s*\(mm\)", r"length_mm", r"average of length"))
+            size_desc = choose_size_descriptor(body, length_val)
+
+            raw_ctx = _row_structured_context(df, row)
+            text = llm_enhance_variant_text(make, model, yrs, body, engine, trans, size_desc, perf_b, bb, seats_label, raw_ctx)
+            if not text:
+                text = df.loc[i, "essence_main"]
+            enhanced.append(text)
+            processed += 1
+            if processed % max(1, args.progress_every) == 0 or processed == 1:
+                print(f"[llm] row {i+1}/{len(df)}")
+                try:
+                    if args.progress_file:
+                        with open(args.progress_file, "w", encoding="utf-8") as pf:
+                            pf.write(str(i))
+                except Exception:
+                    pass
+        if args.limit is not None:
+            df.loc[args.start_index: args.start_index + len(enhanced) - 1, "essence_main"] = enhanced
+        else:
+            if args.start_index and len(enhanced) > 0:
+                df.loc[args.start_index: args.start_index + len(enhanced) - 1, "essence_main"] = enhanced
+            else:
+                df["essence_main"] = enhanced
 
     # Ensure rivals_json_family column exists
     if "rivals_json_family" not in df.columns:
