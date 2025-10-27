@@ -113,8 +113,73 @@ SELECT
 FROM cars_staging_temp
 WHERE vector_main_text IS NOT NULL 
   AND vector_main_text != ''
+  AND vector_main_text NOT LIKE '[]'
   AND vector_specs_text IS NOT NULL
-  AND vector_specs_text != '';
+  AND vector_specs_text != ''
+  AND vector_specs_text NOT LIKE '[]'
+  -- Exclude rows with invalid data
+  AND (year_end ~ '^[0-9]+$' OR year_end IS NULL OR year_end = '')
+  AND (doors ~ '^[0-9]+$' OR doors IS NULL OR doors = '')
+  AND (power_bhp ~ '^[0-9]+$' OR power_bhp IS NULL OR power_bhp = '');
+```
+
+**Alternative: Simpler INSERT (handles non-numeric values gracefully)**
+
+If the above fails with validation errors, try this safer version:
+
+```sql
+INSERT INTO cars (
+    make, model, series_production_years, year_start, year_end,
+    real_body_type, engine_type, power_bhp, transmission, doors, seats,
+    used_price_low_min, used_price_high_max, mpg_low_min, 
+    insurance_group_min, zero_to_sixty_secs_min, length_mm_avg,
+    width_mm_avg, height_mm_avg, luggage_capacity_litres_avg,
+    essence_main, image_urls, vector_main, vector_specs,
+    vector_main_text, vector_specs_text
+)
+SELECT 
+    make, 
+    model, 
+    series_production_years, 
+    year_start,
+    CASE 
+        WHEN year_end ~ '^[0-9]+$' THEN year_end::integer 
+        ELSE NULL 
+    END as year_end,
+    real_body_type, 
+    engine_type, 
+    CASE 
+        WHEN power_bhp ~ '^[0-9]+$' THEN power_bhp::integer 
+        ELSE NULL 
+    END as power_bhp,
+    transmission, 
+    CASE 
+        WHEN doors ~ '^[0-9]+$' THEN doors::integer 
+        ELSE NULL 
+    END as doors, 
+    seats,
+    used_price_low_min, 
+    used_price_high_max, 
+    mpg_low_min,
+    insurance_group_min, 
+    zero_to_sixty_secs_min, 
+    length_mm_avg,
+    width_mm_avg, 
+    height_mm_avg, 
+    luggage_capacity_litres_avg,
+    essence_main, 
+    image_urls,
+    (string_to_array(TRIM(both '[]' from vector_main_text), ',')::float[])::vector(1536) as vector_main,
+    (string_to_array(TRIM(both '[]' from vector_specs_text), ',')::float[])::vector(1536) as vector_specs,
+    vector_main_text,
+    vector_specs_text
+FROM cars_staging_temp
+WHERE vector_main_text IS NOT NULL 
+  AND vector_main_text != ''
+  AND vector_main_text NOT LIKE '[]'
+  AND vector_specs_text IS NOT NULL
+  AND vector_specs_text != ''
+  AND vector_specs_text NOT LIKE '[]';
 ```
 
 **Important Notes:**
