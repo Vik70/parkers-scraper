@@ -105,8 +105,9 @@ SELECT
     essence_main, 
     image_urls,
     -- Convert text vectors to proper vector type
-    string_to_array(vector_main_text, ',')::vector(1536) as vector_main,
-    string_to_array(vector_specs_text, ',')::vector(1536) as vector_specs,
+    -- First convert to text array, then to float array, then to vector
+    array_remove(string_to_array(vector_main_text, ',')::float[], NULL)::vector(1536) as vector_main,
+    array_remove(string_to_array(vector_specs_text, ',')::float[], NULL)::vector(1536) as vector_specs,
     vector_main_text,
     vector_specs_text
 FROM cars_staging_temp
